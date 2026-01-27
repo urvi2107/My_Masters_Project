@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Data
+data/
+*.h5
+*.hdf5
+*.pt
+*.nc
+
+# Jupyter
+.ipynb_checkpoints/
