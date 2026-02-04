@@ -17,3 +17,7 @@ data/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Experiments and Outputs
+notebooks/experiments/
+figures/
