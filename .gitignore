@@ -21,3 +21,10 @@ data/
 # Experiments and Outputs
 notebooks/experiments/
 figures/
+checkpoints/
+results/
+
+# Environment/Shortcuts
+experiments_shortcut
+logs_shortcut
+.venv/
