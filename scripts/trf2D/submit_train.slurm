@@ -4,11 +4,10 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --time=04:00:00
 #SBATCH --time=24:00:00
-#SBATCH --job-name=trf2sz_500
-#SBATCH --output=/home/un212/rds/hpc-work/logs/train_zscore_500_%j.out
-#SBATCH --error=/home/un212/rds/hpc-work/logs/train_zscore_500_%j.err
+#SBATCH --job-name=trf2D_fno_pro
+#SBATCH --output=/home/un212/rds/hpc-work/logs/trf2D_pro_%j.out
+#SBATCH --error=/home/un212/rds/hpc-work/logs/trf2D_pro_%j.err
 
 # Activate virtual environment
 source /home/un212/DiSWellProject/My_Masters_Project/.venv/bin/activate
@@ -17,4 +16,5 @@ source /home/un212/DiSWellProject/My_Masters_Project/.venv/bin/activate
 cd /home/un212/DiSWellProject/My_Masters_Project
 
 # Run the script with unbuffered output
-python3 -u scripts/trf2D/train.py
+export PYTHONPATH=$PYTHONPATH:.
+python3 -u scripts/trf2D/train.py --epochs 500 --batch_size 64
