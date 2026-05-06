@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import wandb
 from einops import rearrange
-from neuralop.models import FNO
+from the_well.benchmark.models.unet_classic import UNetClassic
 from tqdm import tqdm
 
 from the_well.benchmark.metrics import VRMSE
@@ -50,12 +50,12 @@ def main():
 
     F = dataset.metadata.n_fields
     
-    model = FNO(
-        n_modes=(16,16),
-        in_channels = 4*F,
-        out_channels = 1*F,
-        hidden_channels = 128,
-        n_layers = 4,
+    model = UNetClassic(
+        dim_in = 4*F,
+        dim_out = 1*F,
+        n_spatial_dims = 2,
+        spatial_resolution = dataset.metadata.spatial_resolution, #64 x 64
+        init_features = 32,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -64,7 +64,7 @@ def main():
         dataset,
         shuffle=True,
         batch_size = args.batch_size,
-        num_workers=4,
+        num_workers=0,
     )
 
     print("Starting training loop...")
@@ -88,7 +88,7 @@ def main():
         validset,
         shuffle=False,
         batch_size=64,
-        num_workers=4
+        num_workers=0
     )
 
     # Resume from checkpoint if exists
@@ -126,18 +126,19 @@ def main():
 
     # Setup WandB
     wandb.init(
-        project="trf2D_fno_upgrade",
+        project="trf2D_unet_upgrade", 
         config={
             "learning_rate": args.lr,
             "epochs": epochs,
             "batch_size": args.batch_size,
             "n_steps_input": 4,
-            "n_layers": 4,
-            "hidden_channels": 128,
+            "init_features": 32,      
             "amp": True,
-            "warmup_epochs": 5
+            "warmup_epochs": 5,
+            "model": "UNetClassic"    
         }
     )
+
     # Define epoch as the primary step metric for plots
     wandb.define_metric("epoch")
     wandb.define_metric("*", step_metric="epoch")
@@ -254,7 +255,7 @@ def main():
         # Save Best Model
         if avg_vrmse < best_vrmse:
             best_vrmse = avg_vrmse
-            checkpoint_name = f"best_model_fno_epoch{epoch+1}_vrmse{best_vrmse:.4f}.pt"
+            checkpoint_name = f"best_model_unet_epoch{epoch+1}_vrmse{best_vrmse:.4f}.pt"
             torch.save(model.state_dict(), os.path.join(PROJECT_ROOT, "checkpoints", checkpoint_name))
             print(f"New best model saved! VRMSE: {best_vrmse:.4f}")
 
