@@ -3,14 +3,14 @@ import sys
 import torch
 from tqdm import tqdm
 from einops import rearrange
-from neuralop.models import FNO
+from the_well.benchmark.models.unet_classic import UNetClassic
 from the_well.data import WellDataset
 from the_well.data.normalization import ZScoreNormalization
 from the_well.benchmark.metrics import VRMSE
 
 def main():
     import sys
-    log_file = open("/home/un212/DiSWellProject/My_Masters_Project/evaluation_debug.log", "w")
+    log_file = open("/home/un212/DiSWellProject/My_Masters_Project/evaluation_unet_debug.log", "w")
     class Logger:
         def write(self, message):
             sys.__stdout__.write(message)
@@ -39,7 +39,7 @@ def main():
     PROJECT_ROOT = "/home/un212/DiSWellProject/My_Masters_Project"
     DATASET_DIR = "/home/un212/DiSWellProject/My_Masters_Project/data"
     DATASET_NAME = "turbulent_radiative_layer_2D"
-    CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "best_model_fno_epoch140_vrmse0.3176.pt") 
+    CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "best_model_unet_epoch425_vrmse0.2451.pt") 
     if len(sys.argv) > 1:
         CHECKPOINT_PATH = sys.argv[1]
 
@@ -59,12 +59,12 @@ def main():
     F = dataset.metadata.n_fields
     
     # 2. Initialize and Load Model
-    model = FNO(
-        n_modes=(16,16),
-        in_channels = 4*F,
-        out_channels = 1*F,
-        hidden_channels = 128,
-        n_layers = 4,
+    model = UNetClassic(
+        dim_in = 4*F,
+        dim_out = 1*F,
+        n_spatial_dims = 2,
+        spatial_resolution = dataset.metadata.spatial_resolution, #64 x 64
+        init_features = 32,
     ).to(device)
 
     print(f"Loading checkpoint from {CHECKPOINT_PATH}")
@@ -83,12 +83,13 @@ def main():
     # 4. Initialize WandB
     print(f"[{time.ctime()}] Initializing WandB...", flush=True)
     wandb.init(
-        project="trf2D_fno_upgrade",
+        project="trf2D_unet_upgrade",
         job_type="evaluation",
         config={
             "checkpoint": CHECKPOINT_PATH,
             "dataset": DATASET_NAME,
-            "rollout_steps": rollout_steps
+            "rollout_steps": rollout_steps,
+            "model": "UNetClassic"
         }
     )
     print(f"[{time.ctime()}] WandB Initialized.", flush=True)
