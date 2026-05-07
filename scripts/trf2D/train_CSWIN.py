@@ -65,7 +65,8 @@ def main():
         dataset,
         shuffle=True,
         batch_size = args.batch_size,
-        num_workers=0,
+        num_workers=4,
+        pin_memory=True,
     )
 
     print("Starting training loop...")
@@ -89,7 +90,8 @@ def main():
         validset,
         shuffle=False,
         batch_size=64,
-        num_workers=0
+        num_workers=4,
+        pin_memory=True,
     )
 
     # Resume from checkpoint if exists
@@ -171,9 +173,10 @@ def main():
             y = batch["output_fields"].to(device)
             y = rearrange(y, "B To Lx Ly F -> B (To F) Lx Ly")
 
-            # Removing bfloat16 autocast for model forward as it's unstable for FFT
-            fx = model(x)
-            mse = (fx.float() - y.float()).square().mean()
+            # CSWin has no FFT so bfloat16 AMP is safe here
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                fx = model(x)
+                mse = (fx.float() - y.float()).square().mean()
 
             scaler.scale(mse).backward()
             # Gradient clipping to prevent explosion
