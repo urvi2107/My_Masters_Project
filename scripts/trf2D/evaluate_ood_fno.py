@@ -146,7 +146,7 @@ def main():
     F_fields = dataset.metadata.n_fields
 
     loader = torch.utils.data.DataLoader(
-        dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True
+        dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True
     )
 
     # --- Model ---
