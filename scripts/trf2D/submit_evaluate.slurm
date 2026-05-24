@@ -15,6 +15,10 @@ source /home/un212/DiSWellProject/My_Masters_Project/.venv/bin/activate
 # Navigate to project root
 cd /home/un212/DiSWellProject/My_Masters_Project
 
+# Load ffmpeg module for rollout video generation
+export LD_LIBRARY_PATH=/home/un212/DiSWellProject/My_Masters_Project/lib:$LD_LIBRARY_PATH
+module load ffmpeg/6.0
+
 # Run the evaluation script
 export PYTHONPATH=$PYTHONPATH:.
 python3 -u scripts/trf2D/evaluate.py

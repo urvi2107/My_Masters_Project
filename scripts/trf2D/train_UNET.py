@@ -55,7 +55,7 @@ def main():
         dim_out = 1*F,
         n_spatial_dims = 2,
         spatial_resolution = dataset.metadata.spatial_resolution, #64 x 64
-        init_features = 32,
+        init_features = 48,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -132,7 +132,7 @@ def main():
             "epochs": epochs,
             "batch_size": args.batch_size,
             "n_steps_input": 4,
-            "init_features": 32,      
+            "init_features": 48,      
             "amp": True,
             "warmup_epochs": 5,
             "model": "UNetClassic"    

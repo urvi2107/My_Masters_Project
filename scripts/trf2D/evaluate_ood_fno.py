@@ -31,6 +31,7 @@ from neuralop.models import FNO
 from the_well.data import WellDataset
 from the_well.data.normalization import ZScoreNormalization
 from the_well.benchmark.metrics import VRMSE
+from the_well.benchmark.metrics.spectral import power_spectrum
 
 PROJECT_ROOT = "/home/un212/DiSWellProject/My_Masters_Project"
 DATASET_DIR  = "/home/un212/DiSWellProject/My_Masters_Project/data"
@@ -41,7 +42,7 @@ CHECKPOINT   = os.path.join(PROJECT_ROOT, "checkpoints", "best_model_fno_epoch14
 # 1.0 = native (in-distribution), others are OOD
 RESOLUTION_SCALES = [0.25, 0.5, 1.0, 2.0]
 
-ROLLOUT_STEPS = 5
+ROLLOUT_STEPS = 90
 
 
 def interpolate_spatial(tensor, scale, mode="bilinear"):
@@ -65,6 +66,20 @@ def evaluate_at_scale(model, loader, dataset, F_fields, device, scale, rollout_s
     """Run full evaluation (1-step + rollout) at a given resolution scale."""
     total_vrmse_1s = 0.0
     per_step_vrmse = torch.zeros(rollout_steps, device=device)
+    
+    # Define bins for isotropic power spectrum (log-spaced) based on native resolution
+    spatial_shape = dataset.metadata.spatial_resolution
+    ndims = dataset.metadata.n_spatial_dims
+    bins = torch.logspace(
+        np.log10(2 * np.pi / max(spatial_shape)),
+        np.log10(np.pi * np.sqrt(ndims) + 1e-6),
+        4,
+    ).to(device)
+    bins[0] = 0.0
+    
+    sum_ps_res = torch.zeros(rollout_steps, 3, F_fields, device=device)
+    sum_ps_true = torch.zeros(rollout_steps, 3, F_fields, device=device)
+    
     num_batches = 0
 
     with torch.no_grad():
@@ -118,13 +133,25 @@ def evaluate_at_scale(model, loader, dataset, F_fields, device, scale, rollout_s
 
             v_roll = VRMSE.eval(fx_roll_phys, y_roll_phys, meta=dataset.metadata)
             per_step_vrmse += v_roll.mean(dim=(0, 2))
+            
+            # Compute Spectral Power Spectrums per step
+            for t in range(rollout_steps):
+                _, ps_res_t, _ = power_spectrum(
+                    fx_roll_phys[:, t] - y_roll_phys[:, t], dataset.metadata, bins=bins
+                )
+                _, ps_true_t, _ = power_spectrum(
+                    y_roll_phys[:, t], dataset.metadata, bins=bins
+                )
+                sum_ps_res[t] += ps_res_t.sum(dim=0)
+                sum_ps_true[t] += ps_true_t.sum(dim=0)
 
             num_batches += 1
 
     avg_vrmse_1s   = total_vrmse_1s / num_batches
     avg_per_step   = (per_step_vrmse / num_batches).cpu().numpy()
     avg_roll_vrmse = avg_per_step.mean()
-    return avg_vrmse_1s, avg_roll_vrmse, avg_per_step
+    nrmse_spectral = torch.sqrt(sum_ps_res / (sum_ps_true + 1e-7)).mean(dim=-1).cpu().numpy()
+    return avg_vrmse_1s, avg_roll_vrmse, avg_per_step, nrmse_spectral
 
 
 def main():
@@ -187,10 +214,15 @@ def main():
         label = "IN-DISTRIBUTION" if scale == 1.0 else "OOD"
         print(f"[{label}] Scale {scale:.2f}x → {target_h}×{target_w}")
 
-        vrmse_1s, vrmse_roll, per_step = evaluate_at_scale(
+        vrmse_1s, vrmse_roll, per_step, nrmse_spectral = evaluate_at_scale(
             model, loader, dataset, F_fields, device, scale, ROLLOUT_STEPS
         )
-        results[scale] = {"vrmse_1s": vrmse_1s, "vrmse_roll": vrmse_roll, "per_step": per_step}
+        results[scale] = {
+            "vrmse_1s": vrmse_1s, 
+            "vrmse_roll": vrmse_roll, 
+            "per_step": per_step,
+            "spectral": nrmse_spectral
+        }
 
         print(f"  VRMSE (1-step):  {vrmse_1s:.4f}")
         print(f"  VRMSE (rollout): {vrmse_roll:.4f}")
@@ -221,7 +253,7 @@ def main():
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(scales, vrmse_1s_vals,   "o-", label="VRMSE 1-step")
-    ax.plot(scales, vrmse_roll_vals, "s--", label="VRMSE Rollout (5-step)")
+    ax.plot(scales, vrmse_roll_vals, "s--", label=f"VRMSE Rollout ({ROLLOUT_STEPS}-step)")
     ax.axvline(x=1.0, color="gray", linestyle=":", label="Native resolution")
     ax.set_xlabel("Resolution scale")
     ax.set_ylabel("VRMSE")
@@ -234,6 +266,11 @@ def main():
     fig.savefig(os.path.join(PROJECT_ROOT, "figures", "fno_ood_resolution.png"), dpi=150)
     wandb.log({"ood_resolution_plot": wandb.Image(fig)})
     plt.close(fig)
+
+    # Save spectral OOD results for plotter
+    os.makedirs("results", exist_ok=True)
+    fno_ood_spectral = {str(scale): results[scale]["spectral"] for scale in RESOLUTION_SCALES}
+    np.save("results/fno_ood_spectral.npy", fno_ood_spectral)
 
     wandb.finish()
     print("\nDone.")

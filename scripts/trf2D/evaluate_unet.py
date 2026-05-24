@@ -7,6 +7,7 @@ from the_well.benchmark.models.unet_classic import UNetClassic
 from the_well.data import WellDataset
 from the_well.data.normalization import ZScoreNormalization
 from the_well.benchmark.metrics import VRMSE
+from the_well.benchmark.metrics.spectral import power_spectrum
 
 def main():
     import sys
@@ -44,7 +45,7 @@ def main():
         CHECKPOINT_PATH = sys.argv[1]
 
     # 1. Initialize Test Dataset
-    rollout_steps = 5
+    rollout_steps = 90
     dataset = WellDataset(
         well_base_path=DATASET_DIR,
         well_dataset_name=DATASET_NAME,
@@ -64,7 +65,7 @@ def main():
         dim_out = 1*F,
         n_spatial_dims = 2,
         spatial_resolution = dataset.metadata.spatial_resolution, #64 x 64
-        init_features = 32,
+        init_features = 48,
     ).to(device)
 
     print(f"Loading checkpoint from {CHECKPOINT_PATH}")
@@ -100,6 +101,21 @@ def main():
     # 5. Evaluation Loop
     total_vrmse_1s = 0.0
     per_step_vrmse = torch.zeros(rollout_steps).to(device)
+    per_step_vrmse_fields = torch.zeros(rollout_steps, F, device=device)
+    
+    # Define bins for isotropic power spectrum (log-spaced)
+    spatial_shape = dataset.metadata.spatial_resolution
+    ndims = dataset.metadata.n_spatial_dims
+    bins = torch.logspace(
+        np.log10(2 * np.pi / max(spatial_shape)),
+        np.log10(np.pi * np.sqrt(ndims) + 1e-6),
+        4,
+    ).to(device)
+    bins[0] = 0.0
+    
+    sum_ps_res = torch.zeros(rollout_steps, 3, F, device=device)
+    sum_ps_true = torch.zeros(rollout_steps, 3, F, device=device)
+    
     num_batches = 0
     example_logged = False
     
@@ -140,6 +156,18 @@ def main():
             # Assuming (B, T) here based on train.py usage
             v_roll = VRMSE.eval(fx_roll_phys, y_roll_phys, meta=dataset.metadata) # (B, T, F)
             per_step_vrmse += v_roll.mean(dim=(0, 2))
+            per_step_vrmse_fields += v_roll.mean(dim=0)
+            
+            # Compute Spectral Power Spectrums per step
+            for t in range(rollout_steps):
+                _, ps_res_t, _ = power_spectrum(
+                    fx_roll_phys[:, t] - y_roll_phys[:, t], dataset.metadata, bins=bins
+                )
+                _, ps_true_t, _ = power_spectrum(
+                    y_roll_phys[:, t], dataset.metadata, bins=bins
+                )
+                sum_ps_res[t] += ps_res_t.sum(dim=0)
+                sum_ps_true[t] += ps_true_t.sum(dim=0)
             
             # log one example visualization
             if not example_logged:
@@ -161,6 +189,29 @@ def main():
                 plt.tight_layout()
                 wandb.log({"rollout_visualization": wandb.Image(fig)})
                 plt.close(fig)
+                
+                # Generate rollout video
+                import traceback
+                try:
+                    from the_well.benchmark.metrics.plottable_data import make_video
+                    print("Generating UNet rollout video example...")
+                    video_out_dir = os.path.join(PROJECT_ROOT, "results")
+                    make_video(
+                        fx_roll_phys[0], 
+                        y_roll_phys[0], 
+                        dataset.metadata, 
+                        output_dir=video_out_dir, 
+                        epoch_number="unet"
+                    )
+                    video_path = os.path.join(video_out_dir, dataset.metadata.dataset_name, "rollout_video", f"epochunet_{dataset.metadata.dataset_name}.mp4")
+                    print(f"Rollout video saved to {video_path}")
+                    if os.path.exists(video_path):
+                        wandb.log({"rollout_video": wandb.Video(video_path, fps=8, format="mp4")})
+                        print("Rollout video logged to WandB.")
+                except Exception as e:
+                    print(f"Failed to generate rollout video: {e}")
+                    traceback.print_exc()
+                
                 example_logged = True
             
             num_batches += 1
@@ -184,6 +235,16 @@ def main():
         "test_vrmse_1s": avg_vrmse_1s,
         "test_mean_vrmse_rollout": avg_per_step_vrmse.mean()
     })
+
+    avg_per_step_vrmse_fields = (per_step_vrmse_fields / num_batches).cpu().numpy()
+    
+    # Compute Normalized RMSE per bin = sqrt(res / true) -> mean over fields
+    nrmse_spectral = torch.sqrt(sum_ps_res / (sum_ps_true + 1e-7)).mean(dim=-1).cpu().numpy()
+
+    os.makedirs("results", exist_ok=True)
+    np.save("results/unet_vrmse.npy", avg_per_step_vrmse_fields)
+    np.save("results/unet_nrmse_spectral.npy", nrmse_spectral)
+
     wandb.finish()
 
 if __name__ == "__main__":

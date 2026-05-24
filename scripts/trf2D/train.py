@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import wandb
 from einops import rearrange
-from neuralop.models import FNO
+from the_well.benchmark.models import FNO
 from tqdm import tqdm
 
 from the_well.benchmark.metrics import VRMSE
@@ -51,11 +51,13 @@ def main():
     F = dataset.metadata.n_fields
     
     model = FNO(
-        n_modes=(16,16),
-        in_channels = 4*F,
-        out_channels = 1*F,
-        hidden_channels = 128,
-        n_layers = 4,
+        dim_in=4*F,
+        dim_out=1*F,
+        n_spatial_dims=2,
+        spatial_resolution=dataset.metadata.spatial_resolution,
+        modes1=16,
+        modes2=16,
+        hidden_channels=128,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -132,7 +134,8 @@ def main():
             "epochs": epochs,
             "batch_size": args.batch_size,
             "n_steps_input": 4,
-            "n_layers": 4,
+            "modes1": 16,
+            "modes2": 16,
             "hidden_channels": 128,
             "amp": True,
             "warmup_epochs": 5

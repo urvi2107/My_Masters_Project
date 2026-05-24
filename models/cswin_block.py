@@ -4,9 +4,25 @@ import torch.nn as nn
 from einops import rearrange
 from timm.models.layers import DropPath
 
-# from .swin import create_block_mask, flex_attention
-from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-compiled_flex_attention = torch.compile(flex_attention)
+def flex_attention_fn(*args, **kwargs):
+    from torch.nn.attention.flex_attention import flex_attention as flex_attention_impl
+    # Cache the compilation to avoid per-forward-pass lookup overhead
+    global _compiled_flex_attention_cache
+    if "_compiled_flex_attention_cache" not in globals():
+        _compiled_flex_attention_cache = torch.compile(flex_attention_impl, dynamic=False)
+    return _compiled_flex_attention_cache(*args, **kwargs)
+
+compiled_flex_attention = flex_attention_fn
+
+def create_block_mask(*args, **kwargs):
+    from torch.nn.attention.flex_attention import (
+        create_block_mask as create_block_mask_impl,
+    )
+    if "device" not in kwargs:
+        kwargs["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+    if "_compile" not in kwargs:
+        kwargs["_compile"] = torch.cuda.is_available()
+    return create_block_mask_impl(*args, **kwargs)
 
 
 class Mlp(nn.Module):
@@ -102,7 +118,8 @@ class LePEAttentionFlex(nn.Module):
             # performance. So we'll start with resolution//4, but this is probably
             # too small.
             #  BLOCK_SIZE=resolution, # Not working on nightly currently - fix later
-            _compile=True,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            _compile=torch.cuda.is_available(),
         )  # The 1 is because this is a 2D mask
         # stride = 1
         self.get_v = nn.Conv2d(dim, dim, kernel_size=3, stride=1, padding=1, groups=dim)

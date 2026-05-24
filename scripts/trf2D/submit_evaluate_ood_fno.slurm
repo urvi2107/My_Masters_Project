@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --time=02:00:00
+#SBATCH --time=06:00:00
 #SBATCH --job-name=ood_fno
 #SBATCH --output=/home/un212/rds/hpc-work/logs/ood_fno_%j.out
 #SBATCH --error=/home/un212/rds/hpc-work/logs/ood_fno_%j.err
