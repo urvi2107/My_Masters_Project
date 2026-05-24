@@ -1,0 +1,2 @@
+# Editable install of the_well package with all benchmarking dependencies
+-e /home/un212/DiSWellProject/the_well[benchmark]
