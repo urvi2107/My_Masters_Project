@@ -87,6 +87,7 @@ class LePEAttentionFlex(nn.Module):
             exit(0)
         self.H_sp = H_sp
         self.W_sp = W_sp
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         self.block_mask_func = create_block_mask(
             build_cswin_op(
                 self.H, self.H_sp, self.W, self.W_sp, 1, 1
@@ -95,6 +96,7 @@ class LePEAttentionFlex(nn.Module):
             H=None,
             Q_LEN=self.H * self.W,
             KV_LEN=self.H * self.W,
+            device=device,
             # Block size is tricky - need to work through math to get better answer
             # For 2D, we know that we have one direction contiguous and the other at stride
             # "Resolution", so block size needs to be at least < resolution to get any

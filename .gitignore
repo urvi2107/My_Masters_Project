@@ -28,3 +28,6 @@ results/
 experiments_shortcut
 logs_shortcut
 .venv/
+
+# VA-API graphics libs (needed locally but not version-controlled)
+lib/

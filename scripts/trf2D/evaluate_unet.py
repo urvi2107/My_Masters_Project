@@ -7,6 +7,7 @@ from the_well.benchmark.models.unet_classic import UNetClassic
 from the_well.data import WellDataset
 from the_well.data.normalization import ZScoreNormalization
 from the_well.benchmark.metrics import VRMSE
+from the_well.benchmark.metrics.spectral import power_spectrum
 
 def main():
     import sys
@@ -27,6 +28,8 @@ def main():
     print(f"Using device: {device}", flush=True)
     
     import time
+    import traceback
+    import numpy as np
     start_time = time.time()
     print(f"[{time.ctime()}] Starting main evaluation...", flush=True)
     
@@ -39,12 +42,12 @@ def main():
     PROJECT_ROOT = "/home/un212/DiSWellProject/My_Masters_Project"
     DATASET_DIR = "/home/un212/DiSWellProject/My_Masters_Project/data"
     DATASET_NAME = "turbulent_radiative_layer_2D"
-    CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "best_model_unet_epoch425_vrmse0.2451.pt") 
+    CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "best_model_unet_epoch500_vrmse0.2347.pt")
     if len(sys.argv) > 1:
         CHECKPOINT_PATH = sys.argv[1]
 
     # 1. Initialize Test Dataset
-    rollout_steps = 5
+    rollout_steps = 90
     dataset = WellDataset(
         well_base_path=DATASET_DIR,
         well_dataset_name=DATASET_NAME,
@@ -63,8 +66,8 @@ def main():
         dim_in = 4*F,
         dim_out = 1*F,
         n_spatial_dims = 2,
-        spatial_resolution = dataset.metadata.spatial_resolution, #64 x 64
-        init_features = 32,
+        spatial_resolution = dataset.metadata.spatial_resolution,
+        init_features = 48,  # large model (66.7 MB checkpoints)
     ).to(device)
 
     print(f"Loading checkpoint from {CHECKPOINT_PATH}")
@@ -72,13 +75,24 @@ def main():
     model.eval()
     print(f"[{time.ctime()}] Model loaded. Elapsed: {time.time() - start_time:.2f}s", flush=True)
 
-    # 3. Setup DataLoader
+    batch_size = 4 if device.type == "cpu" else 64
     loader = torch.utils.data.DataLoader(
         dataset, 
-        batch_size=64, 
+        batch_size=batch_size, 
         shuffle=False, 
         num_workers=0
     )
+
+    spatial_shape = dataset.metadata.spatial_resolution
+    ndims = dataset.metadata.n_spatial_dims
+    bins = torch.logspace(
+        np.log10(2 * np.pi / max(spatial_shape)),
+        np.log10(np.pi * np.sqrt(ndims) + 1e-6),
+        4,
+    ).to(device)
+    bins[0] = 0.0
+    # N² for Plancherel normalisation
+    prod_spatial_sq = float(np.prod(np.array(spatial_shape))) ** 2
 
     # 4. Initialize WandB
     print(f"[{time.ctime()}] Initializing WandB...", flush=True)
@@ -100,6 +114,9 @@ def main():
     # 5. Evaluation Loop
     total_vrmse_1s = 0.0
     per_step_vrmse = torch.zeros(rollout_steps).to(device)
+    per_step_vrmse_fields = torch.zeros(rollout_steps, F, device=device)
+    sum_ps_res = torch.zeros(rollout_steps, 3, F, device=device)
+    sum_ps_true = torch.zeros(rollout_steps, 3, F, device=device)
     num_batches = 0
     example_logged = False
     
@@ -136,31 +153,45 @@ def main():
             y_roll_phys = dataset.norm.denormalize_flattened(y, mode="variable")
             
             # Calculate VRMSE per step
-            # VRMSE.eval returns (B, T) or (B, T, F) depending on implementation
-            # Assuming (B, T) here based on train.py usage
             v_roll = VRMSE.eval(fx_roll_phys, y_roll_phys, meta=dataset.metadata) # (B, T, F)
             per_step_vrmse += v_roll.mean(dim=(0, 2))
-            
-            # log one example visualization
+            per_step_vrmse_fields += v_roll.mean(dim=0)
+
+            # Spectral power spectrum — accumulate total bin energy (Plancherel-correct)
+            for t in range(rollout_steps):
+                _, ps_res_t, _, counts = power_spectrum(fx_roll_phys[:, t] - y_roll_phys[:, t], dataset.metadata, bins=bins, return_counts=True)
+                _, ps_true_t, _, _     = power_spectrum(y_roll_phys[:, t],                       dataset.metadata, bins=bins, return_counts=True)
+                bin_counts = counts[:-1].unsqueeze(-1)  # (bins-1, 1)
+                sum_ps_res[t]  += (ps_res_t  * bin_counts / prod_spatial_sq).sum(dim=0)
+                sum_ps_true[t] += (ps_true_t * bin_counts / prod_spatial_sq).sum(dim=0)
+
             if not example_logged:
-                # Log first sample of the first batch
-                # (T, Lx, Ly, F)
-                gt = y_roll_phys[0].cpu().numpy()
-                pred = fx_roll_phys[0].cpu().numpy()
-                
-                fig, axes = plt.subplots(2, rollout_steps, figsize=(rollout_steps*3, 6))
-                for t in range(rollout_steps):
-                    # Plotting first field
-                    axes[0, t].imshow(gt[t, :, :, 0])
-                    axes[0, t].set_title(f"GT step {t+1}")
-                    axes[1, t].imshow(pred[t, :, :, 0])
-                    axes[1, t].set_title(f"Pred step {t+1}")
-                    axes[0, t].axis('off')
-                    axes[1, t].axis('off')
-                
-                plt.tight_layout()
-                wandb.log({"rollout_visualization": wandb.Image(fig)})
-                plt.close(fig)
+                try:
+                    from the_well.benchmark.metrics.plottable_data import make_video
+                    import the_well.benchmark.metrics.plottable_data as _pd
+                    import matplotlib.animation as _anim
+                    # plottable_data imports FFMpegWriter at module level, so patch its namespace
+                    _OrigWriter = _pd.FFMpegWriter
+                    class _Mpeg4Writer(_OrigWriter):
+                        def __init__(self, *args, **kwargs):
+                            kwargs['codec'] = 'mpeg4'
+                            extra = [a for a in kwargs.get('extra_args', [])
+                                     if a not in ('-preset', 'ultrafast', 'fast', 'medium', 'slow')]
+                            kwargs['extra_args'] = extra
+                            super().__init__(*args, **kwargs)
+                    _pd.FFMpegWriter = _Mpeg4Writer
+                    print("Generating UNet rollout video...")
+                    video_out_dir = os.path.join(PROJECT_ROOT, "results")
+                    make_video(fx_roll_phys[0], y_roll_phys[0], dataset.metadata, output_dir=video_out_dir, epoch_number="unet")
+                    _pd.FFMpegWriter = _OrigWriter
+                    video_path = os.path.join(video_out_dir, dataset.metadata.dataset_name, "rollout_video", f"epochunet_{dataset.metadata.dataset_name}.mp4")
+                    print(f"Rollout video saved to {video_path}")
+                    if os.path.exists(video_path):
+                        wandb.log({"rollout_video": wandb.Video(video_path, fps=8, format="mp4")})
+                        print("Rollout video logged to WandB.")
+                except Exception as e:
+                    print(f"Failed to generate rollout video: {e}")
+                    traceback.print_exc()
                 example_logged = True
             
             num_batches += 1
@@ -169,21 +200,22 @@ def main():
 
     avg_vrmse_1s = total_vrmse_1s / num_batches
     avg_per_step_vrmse = (per_step_vrmse / num_batches).cpu().numpy()
-    
+    avg_per_step_vrmse_fields = (per_step_vrmse_fields / num_batches).cpu().numpy()
+    nrmse_spectral = torch.sqrt(sum_ps_res / (sum_ps_true + 1e-7)).mean(dim=-1).cpu().numpy()
+
     print(f"\nFinal Results on TEST split:")
     print(f"Mean VRMSE (1s): {avg_vrmse_1s:.6f}")
     for i, v in enumerate(avg_per_step_vrmse):
         print(f"Mean VRMSE (step {i+1}): {v:.6f}")
-        # Log each step individually to create a plot
-        wandb.log({
-            "rollout_step": i + 1,
-            "vrmse_per_step": v
-        })
+        wandb.log({"rollout_step": i + 1, "vrmse_per_step": v})
 
-    wandb.log({
-        "test_vrmse_1s": avg_vrmse_1s,
-        "test_mean_vrmse_rollout": avg_per_step_vrmse.mean()
-    })
+    wandb.log({"test_vrmse_1s": avg_vrmse_1s, "test_mean_vrmse_rollout": avg_per_step_vrmse.mean()})
+
+    results_dir = os.path.join(PROJECT_ROOT, "results")
+    os.makedirs(results_dir, exist_ok=True)
+    np.save(os.path.join(results_dir, "unet_vrmse.npy"), avg_per_step_vrmse_fields)
+    np.save(os.path.join(results_dir, "unet_nrmse_spectral.npy"), nrmse_spectral)
+    print(f"Results saved to {results_dir}")
     wandb.finish()
 
 if __name__ == "__main__":

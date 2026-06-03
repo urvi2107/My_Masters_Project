@@ -24,7 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train FNO on TRF2D")
     parser.add_argument("--epochs", type=int, default=500, help="Number of epochs")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate")
     parser.add_argument("--offline", action="store_true", help="Run WandB in offline mode")
     parser.add_argument("--scratch", action="store_true", help="Start training from scratch, ignoring checkpoints")
     args = parser.parse_args()
@@ -51,7 +51,7 @@ def main():
     F = dataset.metadata.n_fields
     
     model = FNO(
-        n_modes=(16,16),
+        n_modes=(16, 16),
         in_channels = 4*F,
         out_channels = 1*F,
         hidden_channels = 128,
@@ -94,17 +94,20 @@ def main():
     # Resume from checkpoint if exists
     checkpoint_dir = os.path.join(PROJECT_ROOT, "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
-    
+
+    # LR tag keeps checkpoints from runs with different LRs separate
+    lr_tag = f"lr{args.lr:.0e}".replace("-0", "-").replace("+0", "")
+    ckpt_prefix = f"best_model_fno_{lr_tag}_epoch"
+
     start_epoch = 0
     if not args.scratch:
         # Search for the best model in checkpoints directory
-        checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith("best_model_fno_epoch") and f.endswith(".pt")]
+        checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith(ckpt_prefix) and f.endswith(".pt")]
         if checkpoints:
             # Sort by epoch number to get the latest
             checkpoints.sort(key=lambda x: int(x.split("epoch")[1].split("_")[0]))
             latest_checkpoint = checkpoints[-1]
             checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
-            
             print(f"Loading checkpoint from {checkpoint_path}")
             model.load_state_dict(torch.load(checkpoint_path, map_location=device))
             start_epoch = int(latest_checkpoint.split("epoch")[1].split("_")[0])
@@ -113,14 +116,6 @@ def main():
                 best_vrmse = float(latest_checkpoint.split("vrmse")[1].replace(".pt", ""))
             except:
                 pass
-        else:
-            # Fallback to old location for compatibility
-            old_path = os.path.join(PROJECT_ROOT, "best_model_fno_epoch55_vrmse0.3925.pt")
-            if os.path.exists(old_path):
-                print(f"Loading old checkpoint from {old_path}")
-                model.load_state_dict(torch.load(old_path, map_location=device))
-                start_epoch = 55
-                best_vrmse = 0.3925
     else:
         print("Starting training from scratch as requested.")
 
@@ -254,9 +249,14 @@ def main():
         # Save Best Model
         if avg_vrmse < best_vrmse:
             best_vrmse = avg_vrmse
-            checkpoint_name = f"best_model_fno_epoch{epoch+1}_vrmse{best_vrmse:.4f}.pt"
+            checkpoint_name = f"{ckpt_prefix}{epoch+1}_vrmse{best_vrmse:.4f}.pt"
             torch.save(model.state_dict(), os.path.join(PROJECT_ROOT, "checkpoints", checkpoint_name))
             print(f"New best model saved! VRMSE: {best_vrmse:.4f}")
+
+    # Save Final Model Unconditionally
+    final_checkpoint_name = f"final_model_fno_{lr_tag}_epoch{args.epochs}.pt"
+    torch.save(model.state_dict(), os.path.join(PROJECT_ROOT, "checkpoints", final_checkpoint_name))
+    print(f"Final model saved! {final_checkpoint_name}")
 
     print("Training complete.")
     wandb.finish()

@@ -3,14 +3,14 @@ import sys
 import torch
 from tqdm import tqdm
 from einops import rearrange
-from neuralop.models import FNO
+from the_well.benchmark.models import TFNO
 from the_well.data import WellDataset
 from the_well.data.normalization import ZScoreNormalization
 from the_well.benchmark.metrics import VRMSE
 from the_well.benchmark.metrics.spectral import power_spectrum
 
 def main():
-    log_file = open("/home/un212/DiSWellProject/My_Masters_Project/evaluation_fno_debug.log", "w")
+    log_file = open("/home/un212/DiSWellProject/My_Masters_Project/evaluation_tfno_debug.log", "w")
     class Logger:
         def write(self, message):
             sys.__stdout__.write(message)
@@ -31,14 +31,13 @@ def main():
     import matplotlib
     matplotlib.use('Agg')
     import wandb
+    import matplotlib.pyplot as plt
     import numpy as np
 
-    start_time = time.time()
-
     PROJECT_ROOT = "/home/un212/DiSWellProject/My_Masters_Project"
-    DATASET_DIR  = "/home/un212/DiSWellProject/My_Masters_Project/data"
+    DATASET_DIR = "/home/un212/DiSWellProject/My_Masters_Project/data"
     DATASET_NAME = "turbulent_radiative_layer_2D"
-    CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "best_model_fno_epoch150_vrmse0.3149.pt")
+    CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "best_model_tfno_epoch260_vrmse0.3026.pt")
     if len(sys.argv) > 1:
         CHECKPOINT_PATH = sys.argv[1]
 
@@ -52,29 +51,37 @@ def main():
         use_normalization=True,
         normalization_type=ZScoreNormalization,
     )
-    print(f"[{time.ctime()}] Dataset initialized. Elapsed: {time.time() - start_time:.2f}s", flush=True)
 
     F = dataset.metadata.n_fields
 
-    model = FNO(
-        n_modes=(16, 16),
-        in_channels=4 * F,
-        out_channels=1 * F,
+    model = TFNO(
+        dim_in=4 * F,
+        dim_out=1 * F,
+        n_spatial_dims=2,
+        spatial_resolution=dataset.metadata.spatial_resolution,
+        modes1=16,
+        modes2=16,
         hidden_channels=128,
-        n_layers=4,
     ).to(device)
 
     print(f"Loading checkpoint from {CHECKPOINT_PATH}")
-    state_dict = torch.load(CHECKPOINT_PATH, map_location=device)
-    # Strip 'model.' prefix if checkpoint was saved from a wrapper module
-    if any(k.startswith("model.") for k in state_dict):
-        state_dict = {k.removeprefix("model."): v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict)
+    model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=device))
     model.eval()
-    print(f"[{time.ctime()}] Model loaded. Elapsed: {time.time() - start_time:.2f}s", flush=True)
 
     batch_size = 4 if device.type == "cpu" else 64
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+
+    wandb.init(
+        project="trf2D_tfno",
+        job_type="evaluation",
+        config={"checkpoint": CHECKPOINT_PATH, "dataset": DATASET_NAME, "rollout_steps": rollout_steps, "model": "TFNO"},
+    )
+    wandb.define_metric("rollout_step")
+    wandb.define_metric("vrmse_per_step", step_metric="rollout_step")
+
+    total_vrmse_1s = 0.0
+    per_step_vrmse = torch.zeros(rollout_steps).to(device)
+    per_step_vrmse_fields = torch.zeros(rollout_steps, F, device=device)
 
     spatial_shape = dataset.metadata.spatial_resolution
     ndims = dataset.metadata.n_spatial_dims
@@ -84,71 +91,53 @@ def main():
         4,
     ).to(device)
     bins[0] = 0.0
-    # N² for Plancherel normalisation (product of spatial dimensions)
+    # N² for Plancherel normalisation
     prod_spatial_sq = float(np.prod(np.array(spatial_shape))) ** 2
 
-    print(f"[{time.ctime()}] Initializing WandB...", flush=True)
-    wandb.init(
-        project="trf2D_fno_upgrade",
-        job_type="evaluation",
-        config={"checkpoint": CHECKPOINT_PATH, "dataset": DATASET_NAME, "rollout_steps": rollout_steps, "model": "FNO"},
-    )
-    wandb.define_metric("rollout_step")
-    wandb.define_metric("vrmse_per_step", step_metric="rollout_step")
-    print(f"[{time.ctime()}] WandB Initialized.", flush=True)
-
-    total_vrmse_1s = 0.0
-    per_step_vrmse = torch.zeros(rollout_steps).to(device)
-    per_step_vrmse_fields = torch.zeros(rollout_steps, F, device=device)
-    sum_ps_res  = torch.zeros(rollout_steps, 3, F, device=device)
+    sum_ps_res = torch.zeros(rollout_steps, 3, F, device=device)
     sum_ps_true = torch.zeros(rollout_steps, 3, F, device=device)
+
     num_batches = 0
     example_logged = False
 
-    print(f"Starting evaluation (rollout_steps={rollout_steps})...", flush=True)
     with torch.no_grad():
         for batch in tqdm(loader):
             x = batch["input_fields"].to(device)
-            y = batch["output_fields"].to(device)  # (B, T, Lx, Ly, F)
+            y = batch["output_fields"].to(device)
 
-            # Single-step prediction
             x_input = rearrange(x, "B Ti Lx Ly F -> B (Ti F) Lx Ly")
             fx_1 = model(x_input)
             fx_1 = rearrange(fx_1, "B (To F) Lx Ly -> B To Lx Ly F", To=1, F=F)
             fx_1_phys = dataset.norm.denormalize_flattened(fx_1, mode="variable")
-            y_1_phys  = dataset.norm.denormalize_flattened(y[:, :1], mode="variable")
+            y_1_phys = dataset.norm.denormalize_flattened(y[:, :1], mode="variable")
             vrmse_1 = VRMSE.eval(fx_1_phys, y_1_phys, meta=dataset.metadata).mean().item()
             total_vrmse_1s += vrmse_1
 
-            # Multi-step rollout
             curr_input = x.clone()
             rollout_preds = []
             for _ in range(rollout_steps):
-                inp  = rearrange(curr_input, "B Ti Lx Ly F -> B (Ti F) Lx Ly")
+                inp = rearrange(curr_input, "B Ti Lx Ly F -> B (Ti F) Lx Ly")
                 pred = model(inp)
                 pred = rearrange(pred, "B F Lx Ly -> B 1 Lx Ly F")
                 rollout_preds.append(pred)
                 curr_input = torch.cat([curr_input[:, 1:], pred], dim=1)
 
-            fx_roll      = torch.cat(rollout_preds, dim=1)
+            fx_roll = torch.cat(rollout_preds, dim=1)
             fx_roll_phys = dataset.norm.denormalize_flattened(fx_roll, mode="variable")
-            y_roll_phys  = dataset.norm.denormalize_flattened(y,       mode="variable")
+            y_roll_phys = dataset.norm.denormalize_flattened(y, mode="variable")
 
-            # VRMSE per step
-            v_roll = VRMSE.eval(fx_roll_phys, y_roll_phys, meta=dataset.metadata)  # (B, T, F)
-            per_step_vrmse        += v_roll.mean(dim=(0, 2))
+            v_roll = VRMSE.eval(fx_roll_phys, y_roll_phys, meta=dataset.metadata)
+            per_step_vrmse += v_roll.mean(dim=(0, 2))
             per_step_vrmse_fields += v_roll.mean(dim=0)
 
             # Spectral power spectrum — accumulate total bin energy (Plancherel-correct)
             for t in range(rollout_steps):
-                _, ps_res_t,  _, counts = power_spectrum(fx_roll_phys[:, t] - y_roll_phys[:, t], dataset.metadata, bins=bins, return_counts=True)
-                _, ps_true_t, _, _      = power_spectrum(y_roll_phys[:, t],                       dataset.metadata, bins=bins, return_counts=True)
+                _, ps_res_t, _, counts = power_spectrum(fx_roll_phys[:, t] - y_roll_phys[:, t], dataset.metadata, bins=bins, return_counts=True)
+                _, ps_true_t, _, _     = power_spectrum(y_roll_phys[:, t],                       dataset.metadata, bins=bins, return_counts=True)
                 bin_counts = counts[:-1].unsqueeze(-1)  # (bins-1, 1)
-                # total energy per bin = ps_mean * count / N²  (Plancherel's theorem)
                 sum_ps_res[t]  += (ps_res_t  * bin_counts / prod_spatial_sq).sum(dim=0)
                 sum_ps_true[t] += (ps_true_t * bin_counts / prod_spatial_sq).sum(dim=0)
 
-            # Rollout video (first batch only)
             if not example_logged:
                 try:
                     from the_well.benchmark.metrics.plottable_data import make_video
@@ -164,13 +153,11 @@ def main():
                             kwargs['extra_args'] = extra
                             super().__init__(*args, **kwargs)
                     _pd.FFMpegWriter = _Mpeg4Writer
-                    print("Generating FNO rollout video...")
+                    print("Generating TFNO rollout video...")
                     video_out_dir = os.path.join(PROJECT_ROOT, "results")
-                    make_video(fx_roll_phys[0], y_roll_phys[0], dataset.metadata,
-                               output_dir=video_out_dir, epoch_number="fno")
-                    _pd.FFMpegWriter = _OrigWriter  # restore
-                    video_path = os.path.join(video_out_dir, dataset.metadata.dataset_name,
-                                              "rollout_video", f"epochfno_{dataset.metadata.dataset_name}.mp4")
+                    make_video(fx_roll_phys[0], y_roll_phys[0], dataset.metadata, output_dir=video_out_dir, epoch_number="tfno")
+                    _pd.FFMpegWriter = _OrigWriter
+                    video_path = os.path.join(video_out_dir, dataset.metadata.dataset_name, "rollout_video", f"epochtfno_{dataset.metadata.dataset_name}.mp4")
                     print(f"Rollout video saved to {video_path}")
                     if os.path.exists(video_path):
                         wandb.log({"rollout_video": wandb.Video(video_path, fps=8, format="mp4")})
@@ -182,13 +169,13 @@ def main():
 
             num_batches += 1
 
-    avg_vrmse_1s              = total_vrmse_1s / num_batches
-    avg_per_step_vrmse        = (per_step_vrmse / num_batches).cpu().numpy()
+    avg_vrmse_1s = total_vrmse_1s / num_batches
+    avg_per_step_vrmse = (per_step_vrmse / num_batches).cpu().numpy()
     avg_per_step_vrmse_fields = (per_step_vrmse_fields / num_batches).cpu().numpy()
-    nrmse_spectral            = torch.sqrt(sum_ps_res / (sum_ps_true + 1e-7)).mean(dim=-1).cpu().numpy()
+    nrmse_spectral = torch.sqrt(sum_ps_res / (sum_ps_true + 1e-7)).mean(dim=-1).cpu().numpy()
 
     print(f"\nFinal Results on TEST split:")
-    print(f"Mean VRMSE (1-step): {avg_vrmse_1s:.6f}")
+    print(f"Mean VRMSE (1s): {avg_vrmse_1s:.6f}")
     for i, v in enumerate(avg_per_step_vrmse):
         print(f"Mean VRMSE (step {i+1}): {v:.6f}")
         wandb.log({"rollout_step": i + 1, "vrmse_per_step": v})
@@ -197,8 +184,8 @@ def main():
 
     results_dir = os.path.join(PROJECT_ROOT, "results")
     os.makedirs(results_dir, exist_ok=True)
-    np.save(os.path.join(results_dir, "fno_vrmse.npy"), avg_per_step_vrmse_fields)
-    np.save(os.path.join(results_dir, "fno_nrmse_spectral.npy"), nrmse_spectral)
+    np.save(os.path.join(results_dir, "tfno_vrmse.npy"), avg_per_step_vrmse_fields)
+    np.save(os.path.join(results_dir, "tfno_nrmse_spectral.npy"), nrmse_spectral)
     print(f"Results saved to {results_dir}")
     wandb.finish()
 

@@ -20,12 +20,13 @@ DATASET_DIR = "/home/un212/DiSWellProject/My_Masters_Project/data"
 DATASET_NAME = "turbulent_radiative_layer_2D"
 
 def main():
-    parser = argparse.ArgumentParser(description="Train FNO on TRF2D")
+    parser = argparse.ArgumentParser(description="Train CSWin on TRF2D")
     parser.add_argument("--epochs", type=int, default=500, help="Number of epochs")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
+    parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate")
     parser.add_argument("--offline", action="store_true", help="Run WandB in offline mode")
     parser.add_argument("--scratch", action="store_true", help="Start training from scratch, ignoring checkpoints")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="Use gradient checkpointing to save memory at cost of speed")
     args = parser.parse_args()
 
     if args.offline:
@@ -48,15 +49,22 @@ def main():
     )
 
     F = dataset.metadata.n_fields
+    n_steps_input = 4  # must match WellDataset n_steps_input above
+    spatial_resolution = dataset.metadata.spatial_resolution  # actual data resolution, e.g. (128, 384)
+    dim_in = n_steps_input * F
+    dim_out = F
+    
+    print(f"Dataset spatial_resolution: {spatial_resolution}, F={F}, dim_in={dim_in}")
     
     model = CSWinModel(
-        dim_in=4*F,
-        dim_out=1*F,
+        dim_in=dim_in,
+        dim_out=dim_out,
         n_spatial_dims=2,
-        spatial_resolution=dataset.metadata.spatial_resolution,
-        embed_dim=64,   
-        depth=4,        
-        num_heads=4     
+        spatial_resolution=spatial_resolution,
+        embed_dim=512,                  # Cut width in half (512 channels)
+        depth=16,                       # Kept deep (16 layers) for strong physics representation
+        num_heads=16,                   # 16 heads (512 / 16 = 32 dim per head, perfectly valid)
+        gradient_checkpointing=args.gradient_checkpointing,
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -88,7 +96,7 @@ def main():
     valid_loader = torch.utils.data.DataLoader(
         validset,
         shuffle=False,
-        batch_size=64,
+        batch_size=args.batch_size,  # match train batch size to avoid OOM during validation
         num_workers=0
     )
 
@@ -114,14 +122,6 @@ def main():
                 best_vrmse = float(latest_checkpoint.split("vrmse")[1].replace(".pt", ""))
             except:
                 pass
-        else:
-            # Fallback to old location for compatibility
-            old_path = os.path.join(PROJECT_ROOT, "best_model_fno_epoch55_vrmse0.3925.pt")
-            if os.path.exists(old_path):
-                print(f"Loading old checkpoint from {old_path}")
-                model.load_state_dict(torch.load(old_path, map_location=device))
-                start_epoch = 55
-                best_vrmse = 0.3925
     else:
         print("Starting training from scratch as requested.")
 
@@ -132,13 +132,15 @@ def main():
             "learning_rate": args.lr,
             "epochs": epochs,
             "batch_size": args.batch_size,
-            "n_steps_input": 4,
-            "embed_dim": 64,      
-            "depth": 4,
-            "num_heads": 4,
+            "n_steps_input": n_steps_input,
+            "spatial_resolution": list(spatial_resolution),
+            "embed_dim": 512,      
+            "depth": 16,
+            "num_heads": 16,
             "amp": True,
             "warmup_epochs": 5,
-            "model": "CSWinModel"    
+            "model": "CSWinModel",
+            "gradient_checkpointing": args.gradient_checkpointing,
         }
     )
 
@@ -171,9 +173,9 @@ def main():
             y = batch["output_fields"].to(device)
             y = rearrange(y, "B To Lx Ly F -> B (To F) Lx Ly")
 
-            # Removing bfloat16 autocast for model forward as it's unstable for FFT
-            fx = model(x)
-            mse = (fx.float() - y.float()).square().mean()
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                fx = model(x)
+                mse = (fx.float() - y.float()).square().mean()
 
             scaler.scale(mse).backward()
             # Gradient clipping to prevent explosion
@@ -206,6 +208,7 @@ def main():
         # We'll do a 5-step rollout for validation
         rollout_steps = 5
 
+        avg_vrmse = None
         if (epoch + 1) % 5 == 0 or epoch == 0:
             with torch.no_grad():
                 for val_batch in valid_loader:
@@ -251,17 +254,21 @@ def main():
                 "val_vrmse_1step": avg_vrmse,
                 "val_vrmse_rollout": avg_roll_vrmse
             })
-            
+
+            # Save Best Model (only when validation was computed)
+            if avg_vrmse is not None and avg_vrmse < best_vrmse:
+                best_vrmse = avg_vrmse
+                checkpoint_name = f"best_model_cswin_epoch{epoch+1}_vrmse{best_vrmse:.4f}.pt"
+                torch.save(model.state_dict(), os.path.join(PROJECT_ROOT, "checkpoints", checkpoint_name))
+                print(f"New best model saved! VRMSE: {best_vrmse:.4f}")
+
         # Log all metrics for the epoch at once
         wandb.log(metrics)
-            
-        # Save Best Model
-        if avg_vrmse < best_vrmse:
-            best_vrmse = avg_vrmse
-            checkpoint_name = f"best_model_cswin_epoch{epoch+1}_vrmse{best_vrmse:.4f}.pt"
-            torch.save(model.state_dict(), os.path.join(PROJECT_ROOT, "checkpoints", checkpoint_name))
-            print(f"New best model saved! VRMSE: {best_vrmse:.4f}")
 
+    # Save Final Model Unconditionally
+    final_checkpoint_name = f"final_model_cswin_epoch{args.epochs}.pt"
+    torch.save(model.state_dict(), os.path.join(PROJECT_ROOT, "checkpoints", final_checkpoint_name))
+    print(f"Final model saved! {final_checkpoint_name}")
     print("Training complete.")
     wandb.finish()
 

@@ -4,10 +4,10 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --time=02:00:00
-#SBATCH --job-name=trf2d_unet_eval
-#SBATCH --output=/home/un212/rds/hpc-work/logs/eval_test_trf2d_unet_%j.out
-#SBATCH --error=/home/un212/rds/hpc-work/logs/eval_test_trf2d_unet_%j.err
+#SBATCH --time=04:00:00
+#SBATCH --job-name=trf2d_tfno_eval
+#SBATCH --output=/home/un212/rds/hpc-work/logs/eval_test_trf2d_tfno_%j.out
+#SBATCH --error=/home/un212/rds/hpc-work/logs/eval_test_trf2d_tfno_%j.err
 
 # Activate virtual environment
 module load ffmpeg/6.0
@@ -20,4 +20,4 @@ cd /home/un212/DiSWellProject/My_Masters_Project
 
 # Run the evaluation script
 export PYTHONPATH=$PYTHONPATH:.
-python3 -u scripts/trf2D/evaluate_unet.py
+python3 -u scripts/trf2D/evaluate_tfno.py

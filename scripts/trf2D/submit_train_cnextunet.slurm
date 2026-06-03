@@ -5,9 +5,9 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
-#SBATCH --job-name=trf2D_fno
-#SBATCH --output=/home/un212/rds/hpc-work/logs/trf2D_fno_%j.out
-#SBATCH --error=/home/un212/rds/hpc-work/logs/trf2D_fno_%j.err
+#SBATCH --job-name=trf2D_cnextunet
+#SBATCH --output=/home/un212/rds/hpc-work/logs/trf2D_cnextunet_%j.out
+#SBATCH --error=/home/un212/rds/hpc-work/logs/trf2D_cnextunet_%j.err
 
 # Activate virtual environment
 source /home/un212/DiSWellProject/My_Masters_Project/.venv/bin/activate
@@ -17,5 +17,4 @@ cd /home/un212/DiSWellProject/My_Masters_Project
 
 # Run the script with unbuffered output
 export PYTHONPATH=$PYTHONPATH:.
-# python3 -u scripts/trf2D/train.py --epochs 500 --batch_size 64 --scratch
-python3 -u scripts/trf2D/train.py --epochs 500 --batch_size 16 --lr 1e-3 --scratch
+python3 -u scripts/trf2D/train_CNEXTUNET.py --epochs 500 --batch_size 64 --lr 1e-3 --scratch
