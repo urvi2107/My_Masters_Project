@@ -18,7 +18,7 @@ DATASET_NAME = "turbulent_radiative_layer_2D"
 def main():
     parser = argparse.ArgumentParser(description="Train CNextU-Net on TRF2D")
     parser.add_argument("--epochs", type=int, default=500, help="Number of epochs")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate")
     parser.add_argument("--offline", action="store_true", help="Run WandB in offline mode")
     parser.add_argument("--scratch", action="store_true", help="Start training from scratch, ignoring checkpoints")
@@ -37,7 +37,7 @@ def main():
         well_dataset_name=DATASET_NAME,
         well_split_name="train",
         n_steps_input=4,
-        n_steps_output=1,
+        n_steps_output=4,  # Multi-step rollout training
         use_normalization=True,
         normalization_type=ZScoreNormalization,
     )
@@ -80,7 +80,7 @@ def main():
     valid_loader = torch.utils.data.DataLoader(
         validset,
         shuffle=False,
-        batch_size=64,
+        batch_size=16,
         num_workers=4,
     )
 
@@ -115,6 +115,7 @@ def main():
             "epochs": epochs,
             "batch_size": args.batch_size,
             "n_steps_input": 4,
+            "n_steps_output_train": 4,
             "init_features": 42,
             "blocks_per_stage": 2,
             "amp": True,
@@ -143,13 +144,22 @@ def main():
         bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
 
         for batch in bar:
-            x = batch["input_fields"].to(device)
-            x = rearrange(x, "B Ti Lx Ly F -> B (Ti F) Lx Ly")
-            y = batch["output_fields"].to(device)
-            y = rearrange(y, "B To Lx Ly F -> B (To F) Lx Ly")
+            x = batch["input_fields"].to(device)    # (B, Ti, Lx, Ly, F) normalised
+            y = batch["output_fields"].to(device)    # (B, N_ROLLOUT, Lx, Ly, F) normalised
+            n_rollout = y.shape[1]
 
-            fx = model(x)
-            mse = (fx.float() - y.float()).square().mean()
+            # Multi-step autoregressive rollout in normalised space
+            curr_input = x
+            step_losses = []
+            for t in range(n_rollout):
+                inp = rearrange(curr_input, "B Ti Lx Ly F -> B (Ti F) Lx Ly")
+                pred = model(inp)                                   # (B, F, Lx, Ly)
+                pred = rearrange(pred, "B F Lx Ly -> B 1 Lx Ly F")
+                target_t = y[:, t:t+1]                             # (B, 1, Lx, Ly, F)
+                step_losses.append((pred.float() - target_t.float()).square().mean())
+                curr_input = torch.cat([curr_input[:, 1:], pred.detach()], dim=1)
+
+            mse = torch.stack(step_losses).mean()
 
             scaler.scale(mse).backward()
             scaler.unscale_(optimizer)
@@ -219,9 +229,17 @@ def main():
 
             if avg_vrmse < best_vrmse:
                 best_vrmse = avg_vrmse
-                checkpoint_name = f"{ckpt_prefix}{epoch+1}_vrmse{best_vrmse:.4f}.pt"
-                torch.save(model.state_dict(), os.path.join(checkpoint_dir, checkpoint_name))
+                new_checkpoint_name = f"{ckpt_prefix}{epoch+1}_vrmse{best_vrmse:.4f}.pt"
+                new_checkpoint_path = os.path.join(checkpoint_dir, new_checkpoint_name)
+                torch.save(model.state_dict(), new_checkpoint_path)
                 print(f"New best model saved! VRMSE: {best_vrmse:.4f}")
+                # Clean up old checkpoints of this run to save space
+                for old_ckpt in os.listdir(checkpoint_dir):
+                    if old_ckpt.startswith(ckpt_prefix) and old_ckpt.endswith(".pt") and old_ckpt != new_checkpoint_name:
+                        try:
+                            os.remove(os.path.join(checkpoint_dir, old_ckpt))
+                        except OSError:
+                            pass
 
         wandb.log(metrics)
 

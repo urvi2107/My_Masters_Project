@@ -17,4 +17,4 @@ cd /home/un212/DiSWellProject/My_Masters_Project
 
 # Run the script with unbuffered output
 export PYTHONPATH=$PYTHONPATH:.
-python3 -u scripts/trf2D/train_UNET.py --epochs 500 --batch_size 64 --lr 1e-3 --scratch
+python3 -u scripts/trf2D/train_UNET.py --epochs 300 --batch_size 64 --lr 1e-3 --scratch

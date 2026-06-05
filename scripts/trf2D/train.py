@@ -43,7 +43,7 @@ def main():
         well_dataset_name=DATASET_NAME,
         well_split_name="train",
         n_steps_input=4,
-        n_steps_output=1,
+        n_steps_output=4,  # Multi-step rollout training
         use_normalization=True,
         normalization_type=ZScoreNormalization,
     )
@@ -127,6 +127,7 @@ def main():
             "epochs": epochs,
             "batch_size": args.batch_size,
             "n_steps_input": 4,
+            "n_steps_output_train": 4,
             "n_layers": 4,
             "hidden_channels": 128,
             "amp": True,
@@ -157,14 +158,22 @@ def main():
         bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         
         for batch in bar:
-            x = batch["input_fields"].to(device)
-            x = rearrange(x, "B Ti Lx Ly F -> B (Ti F) Lx Ly")
-            y = batch["output_fields"].to(device)
-            y = rearrange(y, "B To Lx Ly F -> B (To F) Lx Ly")
+            x = batch["input_fields"].to(device)    # (B, Ti, Lx, Ly, F) normalised
+            y = batch["output_fields"].to(device)    # (B, N_ROLLOUT, Lx, Ly, F) normalised
+            n_rollout = y.shape[1]
 
-            # Removing bfloat16 autocast for model forward as it's unstable for FFT
-            fx = model(x)
-            mse = (fx.float() - y.float()).square().mean()
+            # Multi-step autoregressive rollout in normalised space
+            curr_input = x
+            step_losses = []
+            for t in range(n_rollout):
+                inp = rearrange(curr_input, "B Ti Lx Ly F -> B (Ti F) Lx Ly")
+                pred = model(inp)                                   # (B, F, Lx, Ly)
+                pred = rearrange(pred, "B F Lx Ly -> B 1 Lx Ly F")
+                target_t = y[:, t:t+1]                             # (B, 1, Lx, Ly, F)
+                step_losses.append((pred.float() - target_t.float()).square().mean())
+                curr_input = torch.cat([curr_input[:, 1:], pred.detach()], dim=1)
+
+            mse = torch.stack(step_losses).mean()
 
             scaler.scale(mse).backward()
             # Gradient clipping to prevent explosion
@@ -249,9 +258,17 @@ def main():
         # Save Best Model
         if avg_vrmse < best_vrmse:
             best_vrmse = avg_vrmse
-            checkpoint_name = f"{ckpt_prefix}{epoch+1}_vrmse{best_vrmse:.4f}.pt"
-            torch.save(model.state_dict(), os.path.join(PROJECT_ROOT, "checkpoints", checkpoint_name))
+            new_checkpoint_name = f"{ckpt_prefix}{epoch+1}_vrmse{best_vrmse:.4f}.pt"
+            new_checkpoint_path = os.path.join(PROJECT_ROOT, "checkpoints", new_checkpoint_name)
+            torch.save(model.state_dict(), new_checkpoint_path)
             print(f"New best model saved! VRMSE: {best_vrmse:.4f}")
+            # Clean up old checkpoints of this run to save space
+            for old_ckpt in os.listdir(os.path.join(PROJECT_ROOT, "checkpoints")):
+                if old_ckpt.startswith(ckpt_prefix) and old_ckpt.endswith(".pt") and old_ckpt != new_checkpoint_name:
+                    try:
+                        os.remove(os.path.join(PROJECT_ROOT, "checkpoints", old_ckpt))
+                    except OSError:
+                        pass
 
     # Save Final Model Unconditionally
     final_checkpoint_name = f"final_model_fno_{lr_tag}_epoch{args.epochs}.pt"

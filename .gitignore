@@ -31,3 +31,10 @@ logs_shortcut
 
 # VA-API graphics libs (needed locally but not version-controlled)
 lib/
+
+# Weights & Biases
+wandb/
+
+# Log files
+*.log
+

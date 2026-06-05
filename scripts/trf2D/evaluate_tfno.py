@@ -37,7 +37,7 @@ def main():
     PROJECT_ROOT = "/home/un212/DiSWellProject/My_Masters_Project"
     DATASET_DIR = "/home/un212/DiSWellProject/My_Masters_Project/data"
     DATASET_NAME = "turbulent_radiative_layer_2D"
-    CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "best_model_tfno_epoch260_vrmse0.3026.pt")
+    CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "best_model_tfno_lr1e-3_epoch260_vrmse0.2965.pt")
     if len(sys.argv) > 1:
         CHECKPOINT_PATH = sys.argv[1]
 
@@ -113,18 +113,22 @@ def main():
             vrmse_1 = VRMSE.eval(fx_1_phys, y_1_phys, meta=dataset.metadata).mean().item()
             total_vrmse_1s += vrmse_1
 
+            # Multi-step rollout — denorm → re-norm at each step (matches official trainer)
             curr_input = x.clone()
-            rollout_preds = []
+            rollout_preds_phys = []
             for _ in range(rollout_steps):
-                inp = rearrange(curr_input, "B Ti Lx Ly F -> B (Ti F) Lx Ly")
+                inp  = rearrange(curr_input, "B Ti Lx Ly F -> B (Ti F) Lx Ly")
                 pred = model(inp)
                 pred = rearrange(pred, "B F Lx Ly -> B 1 Lx Ly F")
-                rollout_preds.append(pred)
-                curr_input = torch.cat([curr_input[:, 1:], pred], dim=1)
+                # Denormalize to physical space for metric accumulation
+                pred_phys = dataset.norm.denormalize_flattened(pred, mode="variable")
+                rollout_preds_phys.append(pred_phys)
+                # Re-normalize before feeding back as next input
+                pred_renorm = dataset.norm.normalize_flattened(pred_phys, mode="variable")
+                curr_input = torch.cat([curr_input[:, 1:], pred_renorm], dim=1)
 
-            fx_roll = torch.cat(rollout_preds, dim=1)
-            fx_roll_phys = dataset.norm.denormalize_flattened(fx_roll, mode="variable")
-            y_roll_phys = dataset.norm.denormalize_flattened(y, mode="variable")
+            fx_roll_phys = torch.cat(rollout_preds_phys, dim=1)
+            y_roll_phys  = dataset.norm.denormalize_flattened(y, mode="variable")
 
             v_roll = VRMSE.eval(fx_roll_phys, y_roll_phys, meta=dataset.metadata)
             per_step_vrmse += v_roll.mean(dim=(0, 2))
